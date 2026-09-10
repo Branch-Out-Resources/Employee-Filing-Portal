@@ -1040,18 +1040,28 @@ function formatTime12(hhmm) {
 }
 
 // Converts a stored 'YYYY-MM-DD' date string into a short 'Sep 5' display
-// format (month name + day, no year) -- for DISPLAY only. All internal
+// format (numeric month/day, no year) -- for DISPLAY only. All internal
 // logic (day-type auto-detection, storage, calculations) continues to use
-// the original YYYY-MM-DD string; this is purely cosmetic at render time.
-// Parses as LOCAL midnight (never bare `new Date(str)`, which JS treats as
-// UTC midnight) -- the same UTC-shift mistake that caused a Saturday filing
-// to display as Friday is exactly what this guards against here too.
-const SHORT_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+// the original stored string; this is purely cosmetic at render time.
+// Handles two known input formats: 'YYYY-MM-DD' (used for OT/Offset/Leave
+// dates) and 'M/D/YYYY' (used for "Filed" timestamps). Parses as LOCAL
+// midnight, never bare `new Date(str)` -- the same UTC-shift mistake that
+// caused a Saturday filing to display as Friday is exactly what this
+// guards against here too.
 function formatDateShort(dateStr) {
   if (!dateStr) return '';
-  const d = new Date(dateStr + 'T00:00:00');
-  if (isNaN(d.getTime())) return dateStr; // fall back safely on anything unexpected
-  return `${SHORT_MONTHS[d.getMonth()]} ${d.getDate()}`;
+  let y, m, d;
+  const isoMatch = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const slashMatch = String(dateStr).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (isoMatch) {
+    y = parseInt(isoMatch[1], 10); m = parseInt(isoMatch[2], 10); d = parseInt(isoMatch[3], 10);
+  } else if (slashMatch) {
+    m = parseInt(slashMatch[1], 10); d = parseInt(slashMatch[2], 10); y = parseInt(slashMatch[3], 10);
+  } else {
+    return dateStr; // unrecognized format -- fall back safely rather than guess
+  }
+  if (isNaN(m) || isNaN(d)) return dateStr;
+  return `${m}/${d}`;
 }
 
 // ── Official leave credit policy (tenure-based) ──────────────────────────────
@@ -1898,7 +1908,7 @@ async function generateRequestPDF(entry) {
     page.drawText('Reference No:', { x: 28, y, size: 8, font: fontB, color: mgray });
     page.drawText(refNo,           { x: 105, y, size: 8, font: fontR, color: black });
     page.drawText('Date Filed:',   { x: width/2, y, size: 8, font: fontB, color: mgray });
-    page.drawText(String(entry.filed || ''), { x: width/2 + 65, y, size: 8, font: fontR, color: black });
+    page.drawText(String(formatDateShort(entry.filed) || ''), { x: width/2 + 65, y, size: 8, font: fontR, color: black });
 
     // ── Section helper ─────────────────────────────────────────────────────
     function sectionHeader(label, sy) {
@@ -2113,7 +2123,7 @@ function renderLog() {
     otTbody.innerHTML = otEntries.map((e, i) => `
       <tr>
         <td>${otEntries.length - i}</td>
-        <td style="white-space:nowrap">${e.filed}</td>
+        <td style="white-space:nowrap">${formatDateShort(e.filed)}</td>
         <td style="white-space:nowrap">${employeeLink(e)}</td>
         <td style="white-space:nowrap">${formatDateShort(e.date)}</td>
         <td style="font-size:8.5pt;white-space:nowrap">${DAY_TYPE_LABELS[e.dayType]||e.dayType}</td>
@@ -2140,7 +2150,7 @@ function renderLog() {
     offsetTbody.innerHTML = offsetEntries.map((e, i) => `
       <tr>
         <td>${offsetEntries.length - i}</td>
-        <td style="white-space:nowrap">${e.filed}</td>
+        <td style="white-space:nowrap">${formatDateShort(e.filed)}</td>
         <td style="white-space:nowrap">${employeeLink(e)}</td>
         <td style="font-size:8pt">${e.type}</td>
         <td style="white-space:nowrap">${formatDateShort(e.date)}</td>
@@ -2838,7 +2848,7 @@ function renderLeaveLog() {
   tbody.innerHTML = visible.map((e, i) => `
     <tr>
       <td>${visible.length - i}</td>
-      <td style="white-space:nowrap">${e.filed}</td>
+      <td style="white-space:nowrap">${formatDateShort(e.filed)}</td>
       <td style="white-space:nowrap"><a href="#" onclick="previewLeaveEntry(${e.id});return false;" style="color:#1F4E79;font-weight:bold;text-decoration:none;" title="Click to preview slip">${e.empName}</a></td>
       <td style="font-size:8.5pt;white-space:nowrap">${e.leaveType}</td>
       <td style="white-space:nowrap">${formatDateShort(e.dateFrom)}</td>
@@ -2928,7 +2938,7 @@ function buildLeaveSlipHTML(entry) {
   let h = '';
   h += `<div style="display:flex;justify-content:space-between;margin-bottom:14px;font-size:8.5pt;color:#555;">
     <span>Reference No: <strong style="font-family:monospace;color:#1F4E79;letter-spacing:1px;">${refNo}</strong></span>
-    <span>Date Filed: <strong>${entry.filed||'—'}</strong></span>
+    <span>Date Filed: <strong>${formatDateShort(entry.filed)||'—'}</strong></span>
   </div>`;
 
   h += sec('Employee Information');
@@ -3000,7 +3010,7 @@ async function generateLeavePDF(entry) {
     draw('Branch Out Resources OPC', 50, y, bold, 16, navy); y -= 20;
     draw('Leave Request Slip', 50, y, font, 10, rgb(.4,.4,.4)); y -= 30;
     draw('Reference No: LV-' + String(entry.id).slice(-6).toUpperCase(), 50, y, font, 9);
-    draw('Date Filed: ' + (entry.filed||'—'), 350, y, font, 9); y -= 26;
+    draw('Date Filed: ' + (formatDateShort(entry.filed)||'—'), 350, y, font, 9); y -= 26;
 
     draw('EMPLOYEE INFORMATION', 50, y, bold, 10, navy); y -= 16;
     draw('Name: ' + entry.empName, 50, y, font, 10); y -= 15;
@@ -3101,7 +3111,7 @@ function buildSlipHTML(entry) {
   // ── Ref / date row
   h += `<div style="display:flex;justify-content:space-between;margin-bottom:14px;font-size:8.5pt;color:#555;">
     <span>Reference No: <strong style="font-family:monospace;color:#1F4E79;letter-spacing:1px;">${refNo}</strong></span>
-    <span>Date Filed: <strong>${entry.filed||'—'}</strong></span>
+    <span>Date Filed: <strong>${formatDateShort(entry.filed)||'—'}</strong></span>
   </div>`;
 
   // ── Employee Info
