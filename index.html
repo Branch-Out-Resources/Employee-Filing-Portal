@@ -1039,6 +1039,31 @@ function formatTime12(hhmm) {
   return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${period}`;
 }
 
+// Converts a stored 'YYYY-MM-DD' date string into a short 'Sep 5' display
+// format (numeric month/day, no year) -- for DISPLAY only. All internal
+// logic (day-type auto-detection, storage, calculations) continues to use
+// the original stored string; this is purely cosmetic at render time.
+// Handles two known input formats: 'YYYY-MM-DD' (used for OT/Offset/Leave
+// dates) and 'M/D/YYYY' (used for "Filed" timestamps). Parses as LOCAL
+// midnight, never bare `new Date(str)` -- the same UTC-shift mistake that
+// caused a Saturday filing to display as Friday is exactly what this
+// guards against here too.
+function formatDateShort(dateStr) {
+  if (!dateStr) return '';
+  let y, m, d;
+  const isoMatch = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const slashMatch = String(dateStr).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (isoMatch) {
+    y = parseInt(isoMatch[1], 10); m = parseInt(isoMatch[2], 10); d = parseInt(isoMatch[3], 10);
+  } else if (slashMatch) {
+    m = parseInt(slashMatch[1], 10); d = parseInt(slashMatch[2], 10); y = parseInt(slashMatch[3], 10);
+  } else {
+    return dateStr; // unrecognized format -- fall back safely rather than guess
+  }
+  if (isNaN(m) || isNaN(d)) return dateStr;
+  return `${m}/${d}`;
+}
+
 // ── Official leave credit policy (tenure-based) ──────────────────────────────
 // Vacation & Sick Leave: 0 while Probationary; 5 days/year once Regular, until
 // the employee's 1st service anniversary (from Date Hired), then 10 days/year.
@@ -1267,9 +1292,20 @@ async function syncEmployeesToSheet() {
     lastModified: adminCodeLastModified || Date.now(),
   });
   try {
-    await leaveSheetsPost({ action: 'syncEmployees', data: summary });
+    const result = await leaveSheetsPost({ action: 'syncEmployees', data: summary });
+    if (result && result.error) {
+      // The request itself succeeded (HTTP 200), but the backend script
+      // returned an error inside the response body -- e.g. a Sheets API
+      // error. This used to be completely invisible (only a network-level
+      // failure was ever checked), which is exactly what let real sync
+      // failures go undetected. Logged to the console for diagnosis;
+      // deliberately not shown as a disruptive alert(), since a background
+      // mirror failing shouldn't interrupt anyone's work.
+      console.error('syncEmployeesToSheet failed:', result.error);
+    }
   } catch (err) {
     // Best-effort only -- no user-facing error for this background mirror.
+    console.error('syncEmployeesToSheet network error:', err.message);
   }
 }
 
@@ -1732,13 +1768,15 @@ function compute() {
   // embedded in the rate (non-regular days) or added separately (regular days).
   const additionalPay = r.totalPayout - dailyWageAmt;
 
-  // Which figure is PRIMARY depends entirely on the request type: an OT
-  // request is about "how much overtime is being requested," so that
-  // additional amount is the headline figure. An Offset/Alternate Day Off
-  // request is not overtime pay at all -- it's compensation for a full day
-  // worked on a rest day/holiday, so the whole day's payout is the headline
-  // figure instead, with Basic Pay and the extra premium shown as context.
-  const isOTRequest = requestType === 'ot';
+  // Which figure is PRIMARY depends on BOTH the request type AND the day
+  // type. An OT request on an ORDINARY working day is about "how much extra
+  // is being requested on top of pay already covered by salary" -- so the
+  // additional amount is the headline figure. But an OT (or Offset) request
+  // on a NON-REGULAR day (rest day, holiday) isn't really "extra on top of"
+  // anything -- the employee wasn't otherwise scheduled to work that day at
+  // all, so the WHOLE day's payout is what's actually being requested.
+  const isRegularDayType = dayType === 'regular' || dayType === 'spl-working';
+  const isOTRequest = requestType === 'ot' && isRegularDayType;
   const primaryLabel   = isOTRequest ? 'OT Amount Requested'  : 'Total Day Payout';
   const primaryValue   = isOTRequest ? additionalPay          : r.totalPayout;
   const wageLabel       = isOTRequest ? 'Daily Wage / Regular Pay' : 'Basic/Daily Wage';
@@ -1870,7 +1908,7 @@ async function generateRequestPDF(entry) {
     page.drawText('Reference No:', { x: 28, y, size: 8, font: fontB, color: mgray });
     page.drawText(refNo,           { x: 105, y, size: 8, font: fontR, color: black });
     page.drawText('Date Filed:',   { x: width/2, y, size: 8, font: fontB, color: mgray });
-    page.drawText(String(entry.filed || ''), { x: width/2 + 65, y, size: 8, font: fontR, color: black });
+    page.drawText(String(formatDateShort(entry.filed) || ''), { x: width/2 + 65, y, size: 8, font: fontR, color: black });
 
     // ── Section helper ─────────────────────────────────────────────────────
     function sectionHeader(label, sy) {
@@ -1902,10 +1940,10 @@ async function generateRequestPDF(entry) {
     hLine(y + 8); y -= 4;
     y = sectionHeader('REQUEST DETAILS', y);
     row('Request Type',  entry.type,        28, y);
-    row('Date',          entry.date,        28, y - 14);
+    row('Date',          formatDateShort(entry.date), 28, y - 14);
     row('Day Type',      DAY_TYPE_LABELS[entry.dayType] || entry.dayType, 28, y - 28);
     if (entry.offsetDate) {
-      row(entry.isWholeDay ? 'Whole-Day Offset Date' : 'Offset Date', entry.offsetDate, 28, y - 42);
+      row(entry.isWholeDay ? 'Whole-Day Offset Date' : 'Offset Date', formatDateShort(entry.offsetDate), 28, y - 42);
     }
     row('Regular Hours',    entry.regHours || '0', width/2, y);
     row('OT Hours',         entry.otHours  || '0', width/2, y - 14);
@@ -1949,7 +1987,7 @@ async function generateRequestPDF(entry) {
             ? parseFloat(entry.dailyRate) + parseFloat(entry.total)
             : parseFloat(entry.total));
       const additionalPayPdf = totalPayout - dailyWagePdf;
-      const isOTEntryPdf = entry.type === 'OT Request';
+      const isOTEntryPdf = entry.type === 'OT Request' && isRegularDay;
       const primaryLabelPdf   = isOTEntryPdf ? 'OT AMOUNT REQUESTED' : 'TOTAL DAY PAYOUT';
       const primaryValuePdf   = isOTEntryPdf ? additionalPayPdf      : totalPayout;
       const wageLabelPdf       = isOTEntryPdf ? 'Daily Wage / Regular Pay:' : 'Basic/Daily Wage:';
@@ -2085,9 +2123,9 @@ function renderLog() {
     otTbody.innerHTML = otEntries.map((e, i) => `
       <tr>
         <td>${otEntries.length - i}</td>
-        <td style="white-space:nowrap">${e.filed}</td>
+        <td style="white-space:nowrap">${formatDateShort(e.filed)}</td>
         <td style="white-space:nowrap">${employeeLink(e)}</td>
-        <td style="white-space:nowrap">${e.date}</td>
+        <td style="white-space:nowrap">${formatDateShort(e.date)}</td>
         <td style="font-size:8.5pt;white-space:nowrap">${DAY_TYPE_LABELS[e.dayType]||e.dayType}</td>
         <td style="text-align:center">${e.regHours||'—'}</td>
         <td style="text-align:center">${e.otHours||'—'}</td>
@@ -2112,12 +2150,12 @@ function renderLog() {
     offsetTbody.innerHTML = offsetEntries.map((e, i) => `
       <tr>
         <td>${offsetEntries.length - i}</td>
-        <td style="white-space:nowrap">${e.filed}</td>
+        <td style="white-space:nowrap">${formatDateShort(e.filed)}</td>
         <td style="white-space:nowrap">${employeeLink(e)}</td>
         <td style="font-size:8pt">${e.type}</td>
-        <td style="white-space:nowrap">${e.date}</td>
+        <td style="white-space:nowrap">${formatDateShort(e.date)}</td>
         <td style="white-space:nowrap;font-size:8.5pt">${e.timeIn && e.timeOut ? `${formatTime12(e.timeIn)} – ${formatTime12(e.timeOut)}` : '—'}</td>
-        <td style="white-space:nowrap">${e.offsetDate ? `<strong style="color:#1a7a4a">${e.offsetDate}</strong>` : '—'}</td>
+        <td style="white-space:nowrap">${e.offsetDate ? `<strong style="color:#1a7a4a">${formatDateShort(e.offsetDate)}</strong>` : '—'}</td>
         <td style="font-size:8.5pt;white-space:nowrap">${DAY_TYPE_LABELS[e.dayType]||e.dayType}</td>
         <td style="text-align:center">${e.regHours||'—'}</td>
         <td style="text-align:center">${e.otHours||'—'}</td>
@@ -2810,11 +2848,11 @@ function renderLeaveLog() {
   tbody.innerHTML = visible.map((e, i) => `
     <tr>
       <td>${visible.length - i}</td>
-      <td style="white-space:nowrap">${e.filed}</td>
+      <td style="white-space:nowrap">${formatDateShort(e.filed)}</td>
       <td style="white-space:nowrap"><a href="#" onclick="previewLeaveEntry(${e.id});return false;" style="color:#1F4E79;font-weight:bold;text-decoration:none;" title="Click to preview slip">${e.empName}</a></td>
       <td style="font-size:8.5pt;white-space:nowrap">${e.leaveType}</td>
-      <td style="white-space:nowrap">${e.dateFrom}</td>
-      <td style="white-space:nowrap">${e.dateTo}</td>
+      <td style="white-space:nowrap">${formatDateShort(e.dateFrom)}</td>
+      <td style="white-space:nowrap">${formatDateShort(e.dateTo)}</td>
       <td style="text-align:center;font-weight:bold;color:#1a7a4a;">${e.days}</td>
       <td style="font-size:8.5pt;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.purpose||''}">${e.purpose||'—'}</td>
       <td style="white-space:nowrap">${leaveStatusBadge(e.status)}</td>
@@ -2900,7 +2938,7 @@ function buildLeaveSlipHTML(entry) {
   let h = '';
   h += `<div style="display:flex;justify-content:space-between;margin-bottom:14px;font-size:8.5pt;color:#555;">
     <span>Reference No: <strong style="font-family:monospace;color:#1F4E79;letter-spacing:1px;">${refNo}</strong></span>
-    <span>Date Filed: <strong>${entry.filed||'—'}</strong></span>
+    <span>Date Filed: <strong>${formatDateShort(entry.filed)||'—'}</strong></span>
   </div>`;
 
   h += sec('Employee Information');
@@ -2919,8 +2957,8 @@ function buildLeaveSlipHTML(entry) {
   h += `<div class="slip-grid">
     <div>
       ${kv('Leave Type', entry.leaveType)}
-      ${kv('Date From', entry.dateFrom)}
-      ${kv('Date To', entry.dateTo)}
+      ${kv('Date From', formatDateShort(entry.dateFrom))}
+      ${kv('Date To', formatDateShort(entry.dateTo))}
     </div>
     <div>
       ${kv('No. of Days', entry.days)}
@@ -2972,7 +3010,7 @@ async function generateLeavePDF(entry) {
     draw('Branch Out Resources OPC', 50, y, bold, 16, navy); y -= 20;
     draw('Leave Request Slip', 50, y, font, 10, rgb(.4,.4,.4)); y -= 30;
     draw('Reference No: LV-' + String(entry.id).slice(-6).toUpperCase(), 50, y, font, 9);
-    draw('Date Filed: ' + (entry.filed||'—'), 350, y, font, 9); y -= 26;
+    draw('Date Filed: ' + (formatDateShort(entry.filed)||'—'), 350, y, font, 9); y -= 26;
 
     draw('EMPLOYEE INFORMATION', 50, y, bold, 10, navy); y -= 16;
     draw('Name: ' + entry.empName, 50, y, font, 10); y -= 15;
@@ -2981,8 +3019,8 @@ async function generateLeavePDF(entry) {
 
     draw('LEAVE DETAILS', 50, y, bold, 10, navy); y -= 16;
     draw('Leave Type: ' + entry.leaveType, 50, y, font, 10); y -= 15;
-    draw('Date From: ' + entry.dateFrom, 50, y, font, 10); y -= 15;
-    draw('Date To: ' + entry.dateTo, 50, y, font, 10); y -= 15;
+    draw('Date From: ' + formatDateShort(entry.dateFrom), 50, y, font, 10); y -= 15;
+    draw('Date To: ' + formatDateShort(entry.dateTo), 50, y, font, 10); y -= 15;
     draw('No. of Days: ' + entry.days, 50, y, font, 10); y -= 15;
     draw('Status: ' + entry.status, 50, y, bold, 10, entry.status === 'Approved' ? green : navy); y -= 26;
 
@@ -3073,7 +3111,7 @@ function buildSlipHTML(entry) {
   // ── Ref / date row
   h += `<div style="display:flex;justify-content:space-between;margin-bottom:14px;font-size:8.5pt;color:#555;">
     <span>Reference No: <strong style="font-family:monospace;color:#1F4E79;letter-spacing:1px;">${refNo}</strong></span>
-    <span>Date Filed: <strong>${entry.filed||'—'}</strong></span>
+    <span>Date Filed: <strong>${formatDateShort(entry.filed)||'—'}</strong></span>
   </div>`;
 
   // ── Employee Info
@@ -3097,10 +3135,10 @@ function buildSlipHTML(entry) {
   h += `<div class="slip-grid">
     <div>
       ${kv('Request Type', entry.type)}
-      ${kv('OT Date', entry.date||'—')}
+      ${kv('OT Date', formatDateShort(entry.date)||'—')}
       ${kv('Day Type', DAY_TYPE_LABELS[entry.dayType]||entry.dayType)}
       ${entry.offsetDate ? kv(entry.isWholeDay?'Whole-Day Offset Date':'Offset Date',
-          `<span style="color:#1a7a4a;font-weight:bold;">${entry.offsetDate}</span>`) : ''}
+          `<span style="color:#1a7a4a;font-weight:bold;">${formatDateShort(entry.offsetDate)}</span>`) : ''}
     </div>
     <div>
       ${entry.timeIn  ? kv('Time In',  formatTime12(entry.timeIn))  : ''}
@@ -3124,7 +3162,7 @@ function buildSlipHTML(entry) {
   if (parseFloat(entry.ndPay) > 0) h += kv('Night Differential Pay', 'PHP ' + f2(entry.ndPay));
 
   const additionalPaySlip = totalPayout - dailyWageSlip;
-  const isOTEntry = entry.type === 'OT Request';
+  const isOTEntry = entry.type === 'OT Request' && isRegularDay;
   const primaryLabelSlip   = isOTEntry ? 'OT AMOUNT REQUESTED' : 'TOTAL DAY PAYOUT';
   const primaryValueSlip   = isOTEntry ? additionalPaySlip     : totalPayout;
   const wageLabelSlip       = isOTEntry ? 'Daily Wage / Regular Pay' : 'Basic/Daily Wage';
