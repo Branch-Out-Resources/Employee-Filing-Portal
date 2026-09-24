@@ -494,6 +494,7 @@ tbody td { padding: 7px 10px; border-bottom: 1px solid #dde6f0; }
           <div class="field">
             <label>Date to be Offsetted <span style="font-weight:normal;text-transform:none;">(day off requested)</span></label>
             <input type="date" id="f-offset-date">
+            <div style="font-size:7.5pt;color:#888;margin-top:2px;">Optional. If provided, must be at least 2 days from today.</div>
           </div>
 
         </div>
@@ -1601,6 +1602,13 @@ function setType(t) {
   if (t === 'offset') {
     setOffsetType(offsetType);  // apply current sub-tab state
     onOffsetDateChange(); // re-run auto-detection in case a date is already filled in
+    // Restrict the date picker to dates at least 2 days out, matching the
+    // submit-time validation -- a helpful guard, not a substitute for it,
+    // since a user can still type an invalid date directly on some browsers.
+    const minOffset = new Date();
+    minOffset.setDate(minOffset.getDate() + 2);
+    const minOffsetStr = minOffset.getFullYear() + '-' + String(minOffset.getMonth()+1).padStart(2,'0') + '-' + String(minOffset.getDate()).padStart(2,'0');
+    document.getElementById('f-offset-date').min = minOffsetStr;
   } else {
     // Restore OT view
     document.getElementById('time-inputs-row').style.display = '';
@@ -1823,7 +1831,21 @@ async function submitForm() {
   if (!timeIn)  { alert('Please enter Time In.'); return; }
   if (!timeOut) { alert('Please enter Time Out.'); return; }
   if (requestType === 'ot' && finalOtH === 0 && (dayType === 'regular' || dayType === 'spl-working')) { alert('No OT hours computed. Check your time entries.'); return; }
-  if (requestType === 'offset' && !offsetDate) { alert('Please enter the date to be offsetted.'); return; }
+  // Date to be Offsetted is now OPTIONAL -- an employee can file the Offset
+  // request for the day worked without yet committing to a specific day off
+  // in exchange. But whenever a date IS provided, it must be filed at least
+  // 2 days in advance of that date -- filing the same day, or just 1 day
+  // ahead, is not allowed.
+  if (requestType === 'offset' && offsetDate) {
+    const todayStr = (() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); })();
+    const todayAtMidnight  = new Date(todayStr + 'T00:00:00');
+    const offsetAtMidnight = new Date(offsetDate + 'T00:00:00');
+    const daysAhead = Math.round((offsetAtMidnight - todayAtMidnight) / 86400000);
+    if (daysAhead < 2) {
+      alert('The Date to be Offsetted must be filed at least 2 days in advance. Please choose a date at least 2 days from today, or leave this field blank if you have not yet decided.');
+      return;
+    }
+  }
   if (requestType === 'offset' && finalRegH === 0 && finalOtH === 0) { alert('No hours computed. Check your Time In/Time Out.'); return; }
 
   const r          = computeOT(emp, dayType, finalRegH, finalOtH, ndH);
@@ -2686,9 +2708,18 @@ function onLeaveTypeChange() {
 
 function calcLeaveDays(from, to) {
   if (!from || !to) return null;
-  const s = new Date(from), e = new Date(to);
-  const diff = Math.round((e - s) / 86400000) + 1;
-  return diff > 0 ? diff : null;
+  const s = new Date(from + 'T00:00:00'), e = new Date(to + 'T00:00:00');
+  if (isNaN(s.getTime()) || isNaN(e.getTime()) || e < s) return null;
+  // Weekends (Saturday, Sunday) are excluded from the leave-day count --
+  // count only weekdays within the selected range, inclusive of both ends.
+  let count = 0;
+  const cur = new Date(s);
+  while (cur <= e) {
+    const dow = cur.getDay(); // 0 = Sunday, 6 = Saturday
+    if (dow !== 0 && dow !== 6) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count > 0 ? count : null;
 }
 
 function onLeaveDatesChange() {
