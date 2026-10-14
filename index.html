@@ -2278,7 +2278,11 @@ function renderEmpTable() {
       </div>`;
     return `<tr>
       <td>${e.no}</td>
-      <td><strong>${e.name}</strong></td>
+      <td>
+        <input type="text" value="${e.name}" placeholder="Full name"
+               style="width:150px; padding:3px 5px; border:1px solid #C5D8EC; border-radius:4px; font-size:8.5pt; font-weight:bold;"
+               onchange="updateEmpName(${e.no}, this.value)">
+      </td>
       <td>${e.position}</td>
       <td>
         <input type="email" value="${e.email || ''}" placeholder="email@example.com"
@@ -2360,6 +2364,25 @@ function updateEmpEmail(no, value) {
   if (!emp) return;
   emp.email = value.trim();
   saveEmployees();
+}
+
+// Lets the admin correct a name (e.g. a spelling mistake) directly in the
+// portal. This is the RELIABLE way to fix a name -- editing the Google
+// Sheet directly would not update this employee's lastModified timestamp,
+// so the timestamp-based sync (which protects fresh local edits from being
+// overwritten by stale server data) would end up silently ignoring the
+// Sheets correction on every other device, since nothing would make it
+// look "newer." Editing here instead correctly stamps a new timestamp,
+// so the fix actually reaches every device on their next login.
+function updateEmpName(no, value) {
+  const emp = employees.find(e => e.no === no);
+  if (!emp) return;
+  const trimmed = value.trim();
+  if (!trimmed) { alert('Name cannot be empty.'); renderEmpTable(); return; }
+  emp.name = trimmed;
+  saveEmployees();
+  renderEmpTable();
+  if (requestType !== 'leave') populateEmpDropdown(); // refresh so the corrected name shows immediately in the employee dropdown
 }
 
 // Editing Basic Pay only affects FUTURE requests -- past, already-filed
