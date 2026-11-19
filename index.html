@@ -599,9 +599,6 @@ tbody td { padding: 7px 10px; border-bottom: 1px solid #dde6f0; }
       <div class="card-head">
         <span>Overtime (OT) Request Log</span>
         <div style="display:flex;gap:8px;align-items:center;" id="admin-log-btns">
-          <label style="font-size:8pt;color:#555;display:flex;align-items:center;gap:4px;font-weight:normal;white-space:nowrap;">
-            <input type="checkbox" id="show-hidden-ot" onchange="toggleShowHiddenOT(this.checked)"> Show cleared
-          </label>
           <button class="btn-sm btn-outline-red"  onclick="clearLog()">Clear All (OT &amp; Offset)</button>
           <button class="btn-sm btn-outline-blue" onclick="loadLog()" id="sync-btn">↻ Sync</button>
           <button class="btn-sm btn-green"         onclick="exportToExcel('ot')">⬇ Export to Excel</button>
@@ -680,9 +677,6 @@ tbody td { padding: 7px 10px; border-bottom: 1px solid #dde6f0; }
       <div class="card-head card-head-green">
         <span>Leave Request Log</span>
         <div style="display:flex;gap:8px;align-items:center;" id="leave-admin-log-btns">
-          <label style="font-size:8pt;color:#fff;display:flex;align-items:center;gap:4px;font-weight:normal;white-space:nowrap;">
-            <input type="checkbox" id="show-hidden-leave" onchange="toggleShowHiddenLeave(this.checked)"> Show cleared
-          </label>
           <button class="btn-sm btn-outline-red"  onclick="clearLeaveLog()">Clear Log</button>
           <button class="btn-sm btn-outline-blue" onclick="loadLeaveLog()" id="leave-sync-btn">↻ Sync</button>
           <button class="btn-sm btn-green"         onclick="exportLeaveToExcel()">⬇ Export to Excel</button>
@@ -1171,13 +1165,6 @@ const DEFAULT_EMPLOYEES = [
 let employees   = loadEmployees();
 let log         = migrateLog(JSON.parse(localStorage.getItem('ot_log') || '[]'));
 let leaveLog    = JSON.parse(localStorage.getItem('leave_log') || '[]'); // fully separate from OT/Offset log
-// Whether the admin currently wants to see entries they've cleared from
-// their own view -- purely a display preference, never affects what's
-// actually stored or what an employee sees of their own history.
-let showHiddenOT    = false;
-let showHiddenLeave = false;
-function toggleShowHiddenOT(checked)    { showHiddenOT = checked;    renderLog(); }
-function toggleShowHiddenLeave(checked) { showHiddenLeave = checked; renderLeaveLog(); }
 migrateEmployeeRemainingBalances();
 let currentUser = null;  // resets on page close
 let requestType = 'ot';
@@ -2156,11 +2143,7 @@ let logIndex = {}; // id → entry, rebuilt each render
 function renderLog() {
   if (!currentUser) return;
   const isAdmin = currentUser.role === 'admin';
-  // Employees ALWAYS see every one of their own entries -- hiddenFromAdmin
-  // only ever affects what the admin chooses to see of the FULL log.
-  const visible = isAdmin
-    ? (showHiddenOT ? log : log.filter(e => !e.hiddenFromAdmin))
-    : log.filter(e => e.empNo === currentUser.empNo);
+  const visible = isAdmin ? log : log.filter(e => e.empNo === currentUser.empNo);
   logIndex = {};
   visible.forEach(e => { logIndex[e.id] = e; });
 
@@ -2171,8 +2154,7 @@ function renderLog() {
     <button class="pdf-btn" style="background:#1a7a4a;" onclick="previewEntry(${e.id})" title="Preview Slip">👁 Preview</button>
     <button class="pdf-btn" onclick="generateRequestPDF(logIndex[${e.id}])" title="Download PDF">⬇ PDF</button>
     ${isAdmin && (!e.status || e.status === 'Pending') ? `<button class="pdf-btn" style="background:#1a7a4a;" onclick="decideOT(${e.id},'Approved')">✓ Approve</button><button class="pdf-btn" style="background:#c0392b;" onclick="decideOT(${e.id},'Rejected')">✕ Reject</button>` : ''}
-    ${isAdmin && e.hiddenFromAdmin ? `<button class="pdf-btn" style="background:#1F4E79;" onclick="unhideEntry(${e.id})" title="Bring this back into view">↺ Restore</button>` : ''}
-    ${isAdmin && !e.hiddenFromAdmin ? `<button class="del-btn" onclick="deleteEntry(${e.id})" title="Remove from your view only — stays in Sheets and in the employee's own history">×</button>` : ''}
+    ${isAdmin ? `<button class="del-btn" onclick="deleteEntry(${e.id})" title="Remove">×</button>` : ''}
   `;
   const employeeLink = (e) => `<a href="#" onclick="previewEntry(${e.id});return false;" style="color:#1F4E79;font-weight:bold;text-decoration:none;" title="Click to preview slip">${e.empName}</a>`;
 
@@ -2270,59 +2252,38 @@ async function decideOT(id, decision) {
 }
 
 async function deleteEntry(id) {
-  if (!confirm('Remove this entry from your Admin Portal view? It will stay fully stored in Google Sheets and will still appear in the employee\'s own filing history. You can bring it back into view later with "Show cleared".')) return;
-  const entry = log.find(e => e.id === id);
+  if (!confirm('Remove this entry? This will also remove it from the employee\'s own portal view.')) return;
   if (USE_SHEETS) {
-    setStatus('loading', 'Updating…');
+    setStatus('loading', 'Deleting…');
     try {
-      const result = await sheetsPost({action: 'hideFromAdmin', id});
+      const result = await sheetsPost({action: 'delete', id});
       if (result.error) throw new Error(result.error);
-      setStatus('ok', 'Cleared from view ✓');
+      setStatus('ok', 'Deleted ✓');
     } catch(err) {
-      setStatus('error', 'Could not reach Sheets — cleared from this device only.');
+      setStatus('error', 'Could not delete from Sheets — removed locally only.');
     }
   }
-  if (entry) entry.hiddenFromAdmin = true;
-  localStorage.setItem('ot_log', JSON.stringify(log));
-  renderLog();
-}
-
-// Brings a previously-cleared entry back into the admin's own view. The
-// entry's data was never actually touched by clearing it -- this just
-// un-sets the display flag, both locally and in Sheets.
-async function unhideEntry(id) {
-  const entry = log.find(e => e.id === id);
-  if (USE_SHEETS) {
-    setStatus('loading', 'Updating…');
-    try {
-      const result = await sheetsPost({action: 'unhideFromAdmin', id});
-      if (result.error) throw new Error(result.error);
-      setStatus('ok', 'Restored ✓');
-    } catch(err) {
-      setStatus('error', 'Could not reach Sheets — restored on this device only.');
-    }
-  }
-  if (entry) entry.hiddenFromAdmin = false;
+  log = log.filter(e => e.id !== id);
   localStorage.setItem('ot_log', JSON.stringify(log));
   renderLog();
 }
 
 async function clearLog() {
-  if (!confirm('Clear ALL OT and Offset entries from your Admin Portal view? They will stay fully stored in Google Sheets and will still appear in each employee\'s own filing history. You can bring everything back into view later with "Show cleared".')) return;
+  if (!confirm('Clear ALL OT and Offset log entries? This cannot be undone, and will also remove them from employees\' own portal view.')) return;
   if (USE_SHEETS) {
-    setStatus('loading', 'Updating Google Sheets…');
+    setStatus('loading', 'Clearing Google Sheets…');
     try {
-      const result = await sheetsPost({action: 'hideAllFromAdmin'});
+      const result = await sheetsPost({action: 'clear'});
       if (result.error) throw new Error(result.error);
-      setStatus('ok', 'Cleared from view ✓');
+      setStatus('ok', 'Cleared ✓');
     } catch(err) {
-      setStatus('error', 'Could not reach Sheets — cleared from this device only.');
+      setStatus('error', 'Could not clear Sheets — cleared locally only.');
     }
   }
-  log.forEach(e => { e.hiddenFromAdmin = true; });
+  log = [];
   localStorage.setItem('ot_log', JSON.stringify(log));
   renderLog();
-  showToast('Cleared from your view — still safely stored in Sheets and visible to employees.');
+  showToast('Log cleared.');
 }
 
 // ─── Employee management ──────────────────────────────────────────────────────
@@ -2953,11 +2914,7 @@ function renderLeaveLog() {
   const tbody = document.getElementById('leave-log-body');
   const empty = document.getElementById('leave-empty-msg');
   const isAdmin = currentUser.role === 'admin';
-  // Employees ALWAYS see every one of their own entries -- hiddenFromAdmin
-  // only ever affects what the admin chooses to see of the FULL log.
-  const visible = isAdmin
-    ? (showHiddenLeave ? leaveLog : leaveLog.filter(e => !e.hiddenFromAdmin))
-    : leaveLog.filter(e => e.empNo === currentUser.empNo);
+  const visible = isAdmin ? leaveLog : leaveLog.filter(e => e.empNo === currentUser.empNo);
   leaveLogIndex = {};
   visible.forEach(e => { leaveLogIndex[e.id] = e; });
 
@@ -2981,64 +2938,44 @@ function renderLeaveLog() {
         <button class="pdf-btn" style="background:#1a7a4a;" onclick="previewLeaveEntry(${e.id})" title="Preview Slip">👁 Preview</button>
         <button class="pdf-btn" onclick="generateLeavePDF(leaveLogIndex[${e.id}])" title="Download PDF">⬇ PDF</button>
         ${isAdmin && e.status === 'Pending' ? `<button class="pdf-btn" style="background:#1a7a4a;" onclick="decideLeave(${e.id},'Approved')">✓ Approve</button><button class="pdf-btn" style="background:#c0392b;" onclick="decideLeave(${e.id},'Rejected')">✕ Reject</button>` : ''}
-        ${isAdmin && e.hiddenFromAdmin ? `<button class="pdf-btn" style="background:#1F4E79;" onclick="unhideLeaveEntry(${e.id})" title="Bring this back into view">↺ Restore</button>` : ''}
-        ${isAdmin && !e.hiddenFromAdmin ? `<button class="del-btn" onclick="deleteLeaveEntry(${e.id})" title="Remove from your view only — stays in Sheets and in the employee's own history">×</button>` : ''}
+        ${isAdmin ? `<button class="del-btn" onclick="deleteLeaveEntry(${e.id})" title="Remove">×</button>` : ''}
       </td>
     </tr>`).join('');
 }
 
 async function deleteLeaveEntry(id) {
-  if (!confirm('Remove this entry from your Admin Portal view? It will stay fully stored in Google Sheets and will still appear in the employee\'s own filing history. You can bring it back into view later with "Show cleared".')) return;
-  const entry = leaveLog.find(e => e.id === id);
+  if (!confirm('Remove this leave entry? This will also remove it from the employee\'s own portal view.')) return;
   if (USE_SHEETS_FOR_LEAVE) {
-    setStatus('loading', 'Updating…');
+    setStatus('loading', 'Deleting…');
     try {
-      const result = await leaveSheetsPost({ action: 'hideLeaveFromAdmin', id });
+      const result = await leaveSheetsPost({ action: 'deleteLeave', id });
       if (result.error) throw new Error(result.error);
-      setStatus('ok', 'Cleared from view ✓');
+      setStatus('ok', 'Deleted ✓');
     } catch (err) {
-      setStatus('error', 'Could not reach Sheets — cleared from this device only.');
+      setStatus('error', 'Could not delete from Sheets — removed locally only.');
     }
   }
-  if (entry) entry.hiddenFromAdmin = true;
-  localStorage.setItem('leave_log', JSON.stringify(leaveLog));
-  renderLeaveLog();
-}
-
-// Brings a previously-cleared leave entry back into the admin's own view.
-async function unhideLeaveEntry(id) {
-  const entry = leaveLog.find(e => e.id === id);
-  if (USE_SHEETS_FOR_LEAVE) {
-    setStatus('loading', 'Updating…');
-    try {
-      const result = await leaveSheetsPost({ action: 'unhideLeaveFromAdmin', id });
-      if (result.error) throw new Error(result.error);
-      setStatus('ok', 'Restored ✓');
-    } catch (err) {
-      setStatus('error', 'Could not reach Sheets — restored on this device only.');
-    }
-  }
-  if (entry) entry.hiddenFromAdmin = false;
+  leaveLog = leaveLog.filter(e => e.id !== id);
   localStorage.setItem('leave_log', JSON.stringify(leaveLog));
   renderLeaveLog();
 }
 
 async function clearLeaveLog() {
-  if (!confirm('Clear ALL leave entries from your Admin Portal view? They will stay fully stored in Google Sheets and will still appear in each employee\'s own filing history. You can bring everything back into view later with "Show cleared".')) return;
+  if (!confirm('Clear ALL leave log entries? This cannot be undone, and will also remove them from employees\' own portal view.')) return;
   if (USE_SHEETS_FOR_LEAVE) {
-    setStatus('loading', 'Updating Google Sheets…');
+    setStatus('loading', 'Clearing Google Sheets…');
     try {
-      const result = await leaveSheetsPost({ action: 'hideAllLeaveFromAdmin' });
+      const result = await leaveSheetsPost({ action: 'clearLeave' });
       if (result.error) throw new Error(result.error);
-      setStatus('ok', 'Cleared from view ✓');
+      setStatus('ok', 'Cleared ✓');
     } catch (err) {
-      setStatus('error', 'Could not reach Sheets — cleared from this device only.');
+      setStatus('error', 'Could not clear Sheets — cleared locally only.');
     }
   }
-  leaveLog.forEach(e => { e.hiddenFromAdmin = true; });
+  leaveLog = [];
   localStorage.setItem('leave_log', JSON.stringify(leaveLog));
   renderLeaveLog();
-  showToast('Cleared from your view — still safely stored in Sheets and visible to employees.');
+  showToast('Leave log cleared.');
 }
 
 // ─── Leave Excel export ───────────────────────────────────────────────────────
